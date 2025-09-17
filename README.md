@@ -38,67 +38,46 @@ The app simulates placing and brewing tea orders, demonstrates async messaging, 
 ---
 
 ## System Diagram
-```mermaid
-flowchart TD
-  %% Top-to-bottom layout
-  %% TeaApp end-to-end flow with Kong + oauth2-proxy + RabbitMQ
 
-  subgraph CLIENT["TeaApp.Client (console app)"]
-  end
-
-  subgraph KONG["Kong (API Gateway)"]
-  end
-
-  subgraph O2P["oauth2-proxy (OIDC/JWT validation)"]
-  end
-
-  subgraph API["TeaApp.Api (ASP.NET Core + GraphQL)"]
-  end
-
-  subgraph MQ["RabbitMQ"]
-    direction TB
-    subgraph EX["Exchanges"]
-      EXO[tea.orders (direct)]
-      EXB[tea.brewing (fanout)]
-      EXD[tea.brewed (fanout)]
-    end
-    subgraph QQ["Queues"]
-      QO[brew.orders]
-      QB[api.subs.brewing]
-      QD[api.subs.brewed]
-    end
-  end
-
-  subgraph BREWER["TeaApp.Brewer (worker)"]
-  end
-
-  subgraph NOTIFIER["TeaApp.Notifier (worker)"]
-  end
-
-  %% Edges with protocols/ports
-  CLIENT -->|"HTTP/WS :8000 (GraphQL via /graphql)"| KONG
-  KONG -->|"HTTP :4180 (internal)"| O2P
-  O2P -->|"HTTP :8080 (internal)"| API
-  API -->|"AMQP :5672"| MQ
-
-  %% Routing inside RabbitMQ
-  EXO -->|route 'order.placed'| QO
-  EXB -->|fanout| QB
-  EXD -->|fanout| QD
-
-  %% Workers
-  BREWER -->|"consume brew.orders"| QO
-  BREWER -.->|"publish TeaOrderBrewing → tea.brewing (fanout)"| EXB
-  BREWER -.->|"publish TeaOrderBrewed  → tea.brewed  (fanout)"| EXD
-
-  %% GraphQL Subscriptions bridge in API (RabbitToSubscriptions)
-  QB -->|"forward to GraphQL topic: orders/brewing"| API
-  QD -->|"forward to GraphQL topic: orders/brewed"| API
-
-  %% Styling
-  classDef svc fill:#fff,stroke:#222,stroke-width:1px,rx:6,ry:6;
-  class CLIENT,KONG,O2P,API,MQ,BREWER,NOTIFIER svc;
-```
+                    ┌──────────────────────┐
+                    │     TeaApp.Client    │
+                    │  (console app)       │
+                    └───────────┬──────────┘
+                                │ HTTP/WS :8000 (GraphQL)
+                                ▼
+                      ┌───────────────────┐
+                      │       Kong        │
+                      │  (API Gateway)    │
+                      └──────────┬────────┘
+                                 │ HTTP :4180 (internal)
+                                 ▼
+                    ┌──────────────────────────┐
+                    │       oauth2-proxy       │
+                    │ (JWT validation / OIDC)  │
+                    └───────────┬──────────────┘
+                                │ HTTP :8080 (internal)
+                                ▼
+                     ┌────────────────────────┐
+                     │       TeaApp.Api       │
+                     │  (ASP.NET Core + GQL)  │
+                     └──────────┬─────────────┘
+                                │ AMQP :5672
+                                ▼
+         ┌───────────────────────────────────────────┐
+         │                 RabbitMQ                  │
+         │  Exchanges: tea.orders / tea.brewing /    │
+         │             tea.brewed                    │
+         │  Queues:    brew.orders /                 │
+         │             api.subs.brewing /            │
+         │             api.subs.brewed               │
+         └──────────┬───────────────────────┬────────┘
+                    │                       │
+           consumes │                       │ consumes
+                    ▼                       ▼
+        ┌───────────────────┐       ┌───────────────────┐
+        │   Brewer Worker   │       │  Notifier Worker  │
+        │  (process orders) │       │ (react to brewed) │
+        └───────────────────┘       └───────────────────┘
 
 ---
 

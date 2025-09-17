@@ -38,6 +38,7 @@ The app simulates placing and brewing tea orders, demonstrates async messaging, 
 ---
 
 ## System Diagram
+```mermaid
 flowchart TD
   %% Top-to-bottom layout
   %% TeaApp end-to-end flow with Kong + oauth2-proxy + RabbitMQ
@@ -97,7 +98,8 @@ flowchart TD
   %% Styling
   classDef svc fill:#fff,stroke:#222,stroke-width:1px,rx:6,ry:6;
   class CLIENT,KONG,O2P,API,MQ,BREWER,NOTIFIER svc;
-  
+```
+
 ---
 
 ## Authentication Flow

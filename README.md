@@ -38,34 +38,47 @@ The app simulates placing and brewing tea orders, demonstrates async messaging, 
 ---
 
 ## System Diagram
-+———–+            +——————+          +——————+
-|  Client   | – HTTPS ->|     Kong (OSS)   |—>—–>|  oauth2-proxy    |
-| (MSAL DC) |  /graphql  |  (/graphql route)|  auth    | (JWT validation) |
-+———–+            +——————+          +———+––––+
-|                                                         |
-|  Bearer token (AAD)                                     |
-|                                                         v  200 OK (valid)
-|                                               +———+––––+
-|–––––––––––––––––––––––>|   TeaApp.Api     |
-|  GraphQL / WS    |
-+––+––––+––+
-|        ^
-place order (mutation)                                  |        | subscriptions
-v        |
-+––+––––+––+
-|   RabbitMQ       |
-| exchanges/queues |
-+––+––––+––+
-^        |
-consume orders (direct)     publish brewing/brewed     |        | fanout
-+——————+              events (fanout)            |        |
-|  TeaApp.Brewer   |—————————————–+        |
-+——————+                                                  |
-|
-(optional) consume brewed  |
-+———————+        |
-|   TeaApp.Notifier   |<—––+
-+———————+
+```text
+                    ┌──────────────────────┐
+                    │     TeaApp.Client    │
+                    │  (console app)       │
+                    └───────────┬──────────┘
+                                │ HTTP/WS :8000 (GraphQL)
+                                ▼
+                      ┌───────────────────┐
+                      │       Kong        │
+                      │  (API Gateway)    │
+                      └──────────┬────────┘
+                                 │ HTTP :4180 (internal)
+                                 ▼
+                    ┌──────────────────────────┐
+                    │       oauth2-proxy       │
+                    │ (JWT validation / OIDC)  │
+                    └───────────┬──────────────┘
+                                │ HTTP :8080 (internal)
+                                ▼
+                     ┌────────────────────────┐
+                     │       TeaApp.Api       │
+                     │  (ASP.NET Core + GQL)  │
+                     └──────────┬─────────────┘
+                                │ AMQP :5672
+                                ▼
+         ┌───────────────────────────────────────────┐
+         │                 RabbitMQ                  │
+         │  Exchanges: tea.orders / tea.brewing /    │
+         │             tea.brewed                    │
+         │  Queues:    brew.orders /                 │
+         │             api.subs.brewing /            │
+         │             api.subs.brewed               │
+         └──────────┬───────────────────────┬────────┘
+                    │                       │
+           consumes │                       │ consumes
+                    ▼                       ▼
+        ┌───────────────────┐       ┌───────────────────┐
+        │   Brewer Worker   │       │  Notifier Worker  │
+        │  (process orders) │       │ (react to brewed) │
+        └───────────────────┘       └───────────────────┘
+```
 
 ---
 

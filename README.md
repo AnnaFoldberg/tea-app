@@ -38,7 +38,6 @@ The app simulates placing and brewing tea orders, demonstrates async messaging, 
 ---
 
 ## System Diagram
-```text
                     ┌──────────────────────┐
                     │     TeaApp.Client    │
                     │  (console app)       │
@@ -78,7 +77,6 @@ The app simulates placing and brewing tea orders, demonstrates async messaging, 
         │   Brewer Worker   │       │  Notifier Worker  │
         │  (process orders) │       │ (react to brewed) │
         └───────────────────┘       └───────────────────┘
-```
 
 ---
 

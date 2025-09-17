@@ -1,0 +1,6 @@
+# Secrets
+.env
+
+# Keep repo clean
+bin/
+obj/

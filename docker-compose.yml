@@ -1,0 +1,129 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 20s
+
+  teaapi:
+    restart: always
+    build:
+      context: .
+      dockerfile: TeaApp.Api/Dockerfile
+    environment:
+      RABBIT_HOST: ${RABBIT_HOST}
+      RABBIT_USER: ${RABBIT_USER}
+      RABBIT_PASS: ${RABBIT_PASS}
+      AZUREAD__TENANTID: ${AZUREAD__TENANTID}
+      AZUREAD__AUDIENCE: ${AZUREAD__AUDIENCE}
+      AZUREAD__CLIENTID: ${API_AZUREAD_CLIENTID}
+      AUTH__REQUIREDSCOPE: ${AUTH__REQUIREDSCOPE}
+      ASPNETCORE_URLS: http://+:8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 20s
+
+  teabrewer:
+    restart: always
+    build:
+      context: .
+      dockerfile: TeaApp.Brewer/Dockerfile
+    environment:
+      RABBIT_HOST: ${RABBIT_HOST}
+      RABBIT_USER: ${RABBIT_USER}
+      RABBIT_PASS: ${RABBIT_PASS}
+      ASPNETCORE_URLS: http://+:8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 20s
+
+  teanotifier:
+    restart: always
+    build:
+      context: .
+      dockerfile: TeaApp.Notifier/Dockerfile
+    environment:
+      RABBIT_HOST: ${RABBIT_HOST}
+      RABBIT_USER: ${RABBIT_USER}
+      RABBIT_PASS: ${RABBIT_PASS}
+      ASPNETCORE_URLS: http://+:8080
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 20s
+
+  kong:
+    build:
+      context: ./gateway
+    depends_on:
+      teaapi:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yaml
+      KONG_PLUGINS: "bundled"
+    volumes:
+      - ./gateway/kong.yaml:/kong/kong.yaml:ro
+    ports:
+      - "8000:8000" # proxy
+      - "8001:8001" # admin API
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    environment:
+      OAUTH2_PROXY_PROVIDER: "oidc"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: "https://login.microsoftonline.com/${AZUREAD__TENANTID}/v2.0"
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "false"
+
+      # App client (unused in bearer-only but required)
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}
+      OAUTH2_PROXY_REDIRECT_URL: ${OAUTH2_PROXY_REDIRECT_URL}
+
+      # Validate Bearer JWT and then PROXY to teaapi
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS: "true"
+      OAUTH2_PROXY_UPSTREAMS: "http://teaapi:8080"
+
+      # Only accept tokens for your API (both forms)
+      OAUTH2_PROXY_ALLOWED_AUDIENCES: ${AZUREAD__AUDIENCE},${API_AZUREAD_CLIENTID}
+
+      # Required but unused; 32-byte base64
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+
+      # Bind & dev-friendly opts
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
+      OAUTH2_PROXY_COOKIE_SECURE: "false"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+    expose:
+      - "4180"
+    restart: unless-stopped
+    depends_on:
+      - teaapi

@@ -7,13 +7,23 @@ using TeaApp.Contracts;
 
 namespace TeaApp.Api.Services;
 
+/// <summary>
+/// Background service that bridges RabbitMQ events into GraphQL subscriptions.
+/// Consumes tea brewing/brewed events from RabbitMQ exchanges and republishes
+/// them as HotChocolate subscription events via ITopicEventSender.
+/// </summary>
 public sealed class RabbitToSubscriptions : BackgroundService
 {
     private readonly ITopicEventSender _pub;
     private readonly string _host, _user, _pass;
 
+    // RabbitMQ exchange names (Brewer publishes here)
     private const string BrewingExchange = "tea.brewing", BrewedExchange = "tea.brewed";
+
+    // API-specific queues bound to the exchanges
     private const string ApiBrewingQueue = "api.subs.brewing", ApiBrewedQueue = "api.subs.brewed";
+
+    // HotChocolate subscription topics (must match [Topic(...)] attributes in resolvers)
     private const string BrewingTopic = "orders/brewing", BrewedTopic = "orders/brewed";
 
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
@@ -24,6 +34,10 @@ public sealed class RabbitToSubscriptions : BackgroundService
         (_host, _user, _pass) = (host, user, pass);
     }
 
+    /// <summary>
+    /// Main worker loop: connects to RabbitMQ, consumes from brewing/brewed queues,
+    /// and forwards deserialized events into GraphQL subscription topics.
+    /// </summary>
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         var factory = new ConnectionFactory
@@ -37,10 +51,11 @@ public sealed class RabbitToSubscriptions : BackgroundService
         {
             try
             {
+                // Establish connection & channel to RabbitMQ
                 await using var conn = await factory.CreateConnectionAsync(ct);
                 await using var ch = await conn.CreateChannelAsync();
 
-                // ensure exchanges/queues exist
+                // --- Ensure exchanges and queues exist ---
                 await ch.ExchangeDeclareAsync(BrewingExchange, ExchangeType.Fanout, durable: true);
                 await ch.ExchangeDeclareAsync(BrewedExchange, ExchangeType.Fanout, durable: true);
 
@@ -50,13 +65,20 @@ public sealed class RabbitToSubscriptions : BackgroundService
                 await ch.QueueBindAsync(ApiBrewingQueue, BrewingExchange, "");
                 await ch.QueueBindAsync(ApiBrewedQueue, BrewedExchange, "");
 
+                // --- Consumer for brewing events ---
                 var brewing = new AsyncEventingBasicConsumer(ch);
                 brewing.ReceivedAsync += async (_, ea) =>
                 {
+                    // Deserialize RabbitMQ message to contract
                     var evt = JsonSerializer.Deserialize<TeaOrderBrewing>(ea.Body.Span, JsonOpts);
-                    if (evt is not null) await _pub.SendAsync("orders/brewing", evt, ct);
+                    if (evt is not null)
+                    {
+                        // Forward into GraphQL subscription pipeline
+                        await _pub.SendAsync("orders/brewing", evt, ct);
+                    }
                 };
 
+                // --- Consumer for brewed events ---
                 var brewed = new AsyncEventingBasicConsumer(ch);
                 brewed.ReceivedAsync += async (_, ea) =>
                 {
@@ -64,6 +86,7 @@ public sealed class RabbitToSubscriptions : BackgroundService
                     if (evt is not null) await _pub.SendAsync("orders/brewed", evt, ct);
                 };
 
+                // Start consuming both queues (autoAck enabled)
                 await ch.BasicConsumeAsync(ApiBrewingQueue, autoAck: true, brewing, ct);
                 await ch.BasicConsumeAsync(ApiBrewedQueue, autoAck: true, brewed, ct);
 
@@ -76,7 +99,7 @@ public sealed class RabbitToSubscriptions : BackgroundService
             }
             catch
             {
-                // Backoff a bit, then retry connecting
+                // On failure: wait a bit and retry
                 try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch { }
             }
         }

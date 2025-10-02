@@ -16,15 +16,21 @@ public record OrderByIdData(Order? OrderById);
 public record OrdersData(Order[] Orders);
 internal class Program
 {
+    /// <summary>
+    /// Entry point: loads configuration, authenticates via MSAL, and runs the interactive menu.
+    /// </summary>
     private static async Task Main()
     {
         // Config from env (fail fast)
         DotNetEnv.Env.Load(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".env"));
 
+        // Local static method. Reads a required environment variable or throws an
+        // InvalidOperationException if missing.
         static string RequireEnv(string name) =>
             Environment.GetEnvironmentVariable(name)
             ?? throw new InvalidOperationException($"Missing environment variable: {name}");
 
+        // Read required environment variables or throw early (clear error surface)
         var tenantId = RequireEnv("AZUREAD__TENANTID");
         var clientId = RequireEnv("CLIENT_AZUREAD_CLIENTID");
         var audience = RequireEnv("AZUREAD__AUDIENCE");
@@ -35,10 +41,20 @@ internal class Program
         // Compose the delegated scope expected by the API (audience/scopeName)
         var scopes = new[] { $"{audience}/{requiredScope}" };
 
+        // Acquire token with device code and attach it to HttpClient
         var http = await AuthenticateAsync(tenantId, clientId, scopes, apiBase);
+
+        // Run CLI menu loop
         await RunMenuAsync(http, wsUrl);
     }
 
+    /// <summary>
+    /// Authenticates the user using MSAL device-code flow and returns an HttpClient with a Bearer token.
+    /// </summary>
+    /// <param name="tenantId">Azure AD tenant ID.</param>
+    /// <param name="clientId">Public client application client ID.</param>
+    /// <param name="scopes">Delegated scopes required by the API.</param>
+    /// <param name="apiBase">Base URL of the TeaApp GraphQL endpoint.</param>
     private static async Task<HttpClient> AuthenticateAsync(string tenantId, string clientId, string[] scopes, string apiBase)
     {
         var pca = PublicClientApplicationBuilder
@@ -47,24 +63,37 @@ internal class Program
             .WithRedirectUri("http://localhost")
             .Build();
 
+        // Triggers device-code flow in the console; user follows link & enters code
         var result = await pca.AcquireTokenWithDeviceCode(scopes, d =>
         {
             Console.WriteLine(d.Message);
             return Task.CompletedTask;
         }).ExecuteAsync();
-        
+
+        // Attach access token to all HTTP calls to the API
         var http = new HttpClient { BaseAddress = new Uri(apiBase) };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", result.AccessToken);
         return http;
     }
 
+    /// <summary>
+    /// Runs the console menu loop, performs GraphQL operations, and starts a WebSocket subscription for brewing updates.
+    /// </summary>
+    /// <param name="http">Authenticated HttpClient pointing at the GraphQL endpoint.</param>
+    /// <param name="wsUrl">WebSocket URL of the GraphQL endpoint.</param>
     private static async Task RunMenuAsync(HttpClient http, string wsUrl)
     {
         var json = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
+        /// <summary>
+        /// Executes a GraphQL POST request and deserializes the "data" payload to T.
+        /// Throws on HTTP or GraphQL errors.
+        /// </summary>
         async Task<T?> Gql<T>(string query, object? variables = null)
         {
             var payload = new { query, variables };
+
+            // --- GraphQL request (HTTP POST) ---
             using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             using var response = await http.PostAsync("", content);
             var body = await response.Content.ReadAsStringAsync();
@@ -72,10 +101,13 @@ internal class Program
             if (!response.IsSuccessStatusCode) throw new Exception($"GraphQL HTTP {response.StatusCode}: {body}");
 
             using var doc = JsonDocument.Parse(body);
+
+            // Surface GraphQL "errors" if present
             if (doc.RootElement.TryGetProperty("errors", out var errs) &&
                 errs.ValueKind == JsonValueKind.Array && errs.GetArrayLength() > 0)
                 throw new Exception($"GraphQL errors: {errs}");
 
+            // Deserialize only the "data" section to the requested result shape
             if (!doc.RootElement.TryGetProperty("data", out var data)) return default;
             return JsonSerializer.Deserialize<T>(data, json);
         }
@@ -86,7 +118,7 @@ internal class Program
             Console.WriteLine("1) List teas");
             Console.WriteLine("2) Place order");
             Console.WriteLine("3) Get order by id");
-            Console.WriteLine("4) List all orders"); // ← new
+            Console.WriteLine("4) List all orders");
             Console.WriteLine("0) Exit");
             Console.Write("> ");
 
@@ -98,78 +130,84 @@ internal class Program
                 switch (choice)
                 {
                     case "1":
-                    {
-                        const string q = @"query { teas { id name caffeineMg } }";
-                        var data = await Gql<TeasData>(q);
-                        if (data?.Teas is { Length: > 0 } teas)
                         {
-                            Console.WriteLine("\nAvailable teas:");
-                            foreach (var t in teas) Console.WriteLine($"- {t.Id}  {t.Name}  ({t.CaffeineMg} mg)");
+                            // --- GraphQL query: list teas ---
+                            const string q = @"query { teas { id name caffeineMg } }";
+                            var data = await Gql<TeasData>(q);
+                            if (data?.Teas is { Length: > 0 } teas)
+                            {
+                                Console.WriteLine("\nAvailable teas:");
+                                foreach (var t in teas) Console.WriteLine($"- {t.Id}  {t.Name}  ({t.CaffeineMg} mg)");
+                            }
+                            else Console.WriteLine("No teas returned.");
+                            break;
                         }
-                        else Console.WriteLine("No teas returned.");
-                        break;
-                    }
 
                     case "2":
-                    {
-                        Console.Write("Enter teaId to order: ");
-                        var teaId = Console.ReadLine() ?? "";
+                        {
+                            Console.Write("Enter teaId to order: ");
+                            var teaId = Console.ReadLine() ?? "";
 
-                        const string m = @"mutation ($id:String!) {
+                        // --- GraphQL mutation: place order ---
+                            const string m = @"mutation ($id:String!) {
                           placeTeaOrder(teaId:$id) { id: orderId accepted }
                         }";
 
-                        var placed = await Gql<PlaceOrderData>(m, new { id = teaId });
-                        if (placed?.PlaceTeaOrder is null) { Console.WriteLine("Order failed."); break; }
+                            var placed = await Gql<PlaceOrderData>(m, new { id = teaId });
+                            if (placed?.PlaceTeaOrder is null) { Console.WriteLine("Order failed."); break; }
 
-                        var orderId = placed.PlaceTeaOrder.Id;
-                        Console.WriteLine($"Order placed. Id={orderId}, Accepted={placed.PlaceTeaOrder.Accepted}");
-                        if (!placed.PlaceTeaOrder.Accepted) break;
+                            var orderId = placed.PlaceTeaOrder.Id;
+                            Console.WriteLine($"Order placed. Id={orderId}, Accepted={placed.PlaceTeaOrder.Accepted}");
+                            if (!placed.PlaceTeaOrder.Accepted) break;
 
-                        var token = http.DefaultRequestHeaders.Authorization?.Parameter;
-                        if (string.IsNullOrEmpty(token)) { Console.WriteLine("No token available."); break; }
+                            // Reuse API access token to authenticate the WebSocket subscription
+                            var token = http.DefaultRequestHeaders.Authorization?.Parameter;
+                            if (string.IsNullOrEmpty(token)) { Console.WriteLine("No token available."); break; }
 
-                        Console.WriteLine("Waiting for brewing updates... (returns after brewed or timeout)");
-                        try
-                        {
-                            await SubscriptionClient.WaitForOrderAsync(
-                                url: wsUrl,
-                                token: token,
-                                orderId: orderId,
-                                timeout: TimeSpan.FromSeconds(30));
+                            Console.WriteLine("Waiting for brewing updates... (returns after brewed or timeout)");
+                            try
+                            {
+                                // --- Start GraphQL WebSocket subscription for this order (brewing/brewed) ---
+                                await SubscriptionClient.WaitForOrderAsync(
+                                    url: wsUrl, // wss://.../graphql
+                                    token: token, // Bearer token used for WS auth
+                                    orderId: orderId, // Correlates server-side subscription filter
+                                    timeout: TimeSpan.FromSeconds(30));
+                            }
+                            catch (TaskCanceledException)
+                            {
+                                Console.WriteLine("No updates received before timeout.");
+                            }
+                            break;
                         }
-                        catch (TaskCanceledException)
-                        {
-                            Console.WriteLine("No updates received before timeout.");
-                        }
-                        break;
-                    }
 
                     case "3":
-                    {
-                        Console.Write("Enter orderId: ");
-                        var orderId = Console.ReadLine() ?? "";
+                        {
+                            Console.Write("Enter orderId: ");
+                            var orderId = Console.ReadLine() ?? "";
 
-                        const string q = @"query ($oid:String!) { orderById(orderId:$oid) { id: orderId } }";
-                        var data = await Gql<OrderByIdData>(q, new { oid = orderId });
-                        if (data?.OrderById is null) Console.WriteLine("No order found.");
-                        else Console.WriteLine($"Order {data.OrderById.Id}");
-                        break;
-                    }
+                            // --- GraphQL query: get order by id ---
+                            const string q = @"query ($oid:String!) { orderById(orderId:$oid) { id: orderId } }";
+                            var data = await Gql<OrderByIdData>(q, new { oid = orderId });
+                            if (data?.OrderById is null) Console.WriteLine("No order found.");
+                            else Console.WriteLine($"Order {data.OrderById.Id}");
+                            break;
+                        }
 
                     case "4":
-                    {
-                        // Requires API to expose 'orders(): [Order!]!' and map fields
-                        const string q = @"query { orders { id: orderId } }";
-                        var data = await Gql<OrdersData>(q);
-                        if (data?.Orders is { Length: > 0 } list)
                         {
-                            Console.WriteLine("\nOrders:");
-                            foreach (var o in list) Console.WriteLine($"- {o.Id}");
+                            // Requires API to expose 'orders(): [Order!]!' and map fields
+                            // --- GraphQL query: list all orders ---
+                            const string q = @"query { orders { id: orderId } }";
+                            var data = await Gql<OrdersData>(q);
+                            if (data?.Orders is { Length: > 0 } list)
+                            {
+                                Console.WriteLine("\nOrders:");
+                                foreach (var o in list) Console.WriteLine($"- {o.Id}");
+                            }
+                            else Console.WriteLine("No orders found.");
+                            break;
                         }
-                        else Console.WriteLine("No orders found.");
-                        break;
-                    }
 
                     default:
                         Console.WriteLine("Unknown choice.");
